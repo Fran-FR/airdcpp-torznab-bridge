@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Docker
+.env
+
+# App persistence
+bridge_hashes.json
+
+# IDE
+.vscode/
+.idea/
+
+# Tests
+test_*.py
+probe_*.py
+verify_*.py
+tracking_data.json
+bundle_files.json
+modules.json
+searching_results.json
+*.log
