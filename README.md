@@ -4,10 +4,11 @@ Este proyecto actúa como un puente (bridge) entre **AirDC++** y las aplicacione
 
 ## 🚀 Características Principales
 
-- **Búsqueda Multilingüe**: Traduce automáticamente títulos de series al español usando TVMaze cuando Sonarr envía un ID (IMDB/TVDB).
-- **Aislamiento por Categorías**: Separación completa entre las descargas de Radarr y Sonarr.
-- **Soporte de Temporadas**: Capacidad para encontrar y descargar temporadas completas (directorios/bundles).
-- **Seguimiento Robusto**: Cache persistente de descargas finalizadas para asegurar la importación correcta.
+- **Resolución de Títulos Avanzada**: Utiliza **TMDB** (TheMovieDB) y TVMaze para obtener nombres en español y alias exactos.
+- **Normalización de Acentos**: Genera automáticamente variantes con y sin acentos para máxima compatibilidad con hubs.
+- **Búsqueda con Año**: Detecta e incluye el año de lanzamiento en las búsquedas de películas para filtrar el ruido.
+- **Soporte de Temporadas Exhaustivo**: Búsqueda multi-variante y renombrado automático de carpetas genéricas (ej: "Temporada 1" -> "Show - Temporada 1").
+- **Seguimiento en Tiempo Real**: API de qBittorrent optimizada para una importación casi instantánea en Radarr/Sonarr tras finalizar la descarga en AirDC++.
 - **Seguridad**: Configuración sensible centralizada en un archivo `.env`.
 
 ## 🛠️ Instalación y Uso

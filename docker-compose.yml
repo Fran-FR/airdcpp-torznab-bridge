@@ -10,6 +10,7 @@ services:
       - AIRDCPP_USER=${AIRDCPP_USER}
       - AIRDCPP_PASS=${AIRDCPP_PASS}
       - AIRDCPP_API_KEY=${AIRDCPP_API_KEY}
+      - TMDB_API_KEY=${TMDB_API_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
