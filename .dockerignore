@@ -1,0 +1,16 @@
+.git
+.github
+.env
+bridge_hashes.json
+data/
+__pycache__/
+*.pyc
+Dockerfile
+docker-compose.yml
+README.md
+launch_docker.bat
+test/
+brain/
+implementation_plan.md
+walkthrough.md
+task.md
