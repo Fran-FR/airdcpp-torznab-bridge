@@ -46,3 +46,19 @@ Este proyecto actúa como un puente (bridge) entre **AirDC++** y las aplicacione
 - `docker-compose.yml`: Configuración del contenedor.
 - `.env`: Configuración sensible (no subir al control de versiones).
 - `bridge_hashes.json`: Base de datos local de persistencia para mapear descargas.
+
+## 🐳 DockerHub Quick Start
+
+Esta imagen está lista para desplegarse desde DockerHub sin necesidad de construirla localmente.
+
+```bash
+docker run -d \
+  --name airdcpp-bridge \
+  -p 8000:8000 \
+  -e AIRDCPP_URL="http://TU_IP:5600" \
+  -e AIRDCPP_USER="tu_usuario" \
+  -e AIRDCPP_PASS="tu_contraseña" \
+  -e TMDB_API_KEY="tu_key" \
+  -v ./data:/app/data \
+  ffrkain/airdcpp-torznab-bridge:latest
+```

@@ -1,0 +1,14 @@
+services:
+  airdcpp-bridge:
+    image: ffrkain/airdcpp-torznab-bridge:latest
+    container_name: airdcpp-bridge
+    ports:
+      - 8000:8000
+    environment:
+      - AIRDCPP_URL=${AIRDCPP_URL}
+      - AIRDCPP_USER=${AIRDCPP_USER}
+      - AIRDCPP_PASS=${AIRDCPP_PASS}
+      - TMDB_API_KEY=${TMDB_API_KEY}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
