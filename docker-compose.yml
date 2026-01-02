@@ -1,7 +1,7 @@
 services:
   # El Bridge personalizado
   airdcpp-bridge:
-    image: ghcr.io/${GITHUB_REPOSITORY_OWNER_LOWER:-joshua}/airdcpp-torznab-bridge:latest
+    image: ghcr.io/antaneyes/airdcpp-torznab-bridge:latest
     # build: . # Descomentar para desarrollo local
     container_name: airdcpp-bridge
     ports:
