@@ -33,7 +33,6 @@ async def health():
 
 # Configuración
 AIRDCPP_URL = os.getenv("AIRDCPP_URL", "http://localhost:5600")
-AIRDCPP_API_KEY = os.getenv("AIRDCPP_API_KEY", "")
 AIRDCPP_USER = os.getenv("AIRDCPP_USER", "")
 AIRDCPP_PASS = os.getenv("AIRDCPP_PASS", "")
 TMDB_API_KEY = "f637fd7b5ef5b4c62249b8d67122a0f6"
@@ -57,12 +56,43 @@ FILE_LOCK = threading.Lock()
 
 def load_hashes():
     global HASH_MAP_TTH_TO_HEX, HASH_MAP_HEX_TO_TTH, BUNDLE_MAP_ID_TO_TTH, FINISHED_BUNDLES_CACHE
-    if os.path.exists(HASH_FILE):
+    
+    # --- LÓGICA DE MIGRACIÓN Y PROTECCIÓN ---
+    OLD_PATH = "/app/bridge_hashes.json"
+    
+    # 1. Si HASH_FILE es una carpeta (fallo de Docker), lo ignoramos para no crashear
+    if os.path.isdir(HASH_FILE):
+        print(f"ALERTA: '{HASH_FILE}' es una carpeta (posible error de montaje Docker). Usando ruta interna temporal.")
+        temp_path = "/app/bridge_hashes_backup.json"
+        
+        # Intentar migrar desde la vieja si existe
+        if os.path.isfile(OLD_PATH) and not os.path.exists(temp_path):
+            import shutil
+            shutil.copy(OLD_PATH, temp_path)
+            print("INFO: Datos migrados de la ruta antigua a ruta temporal.")
+            
+        load_from_path(temp_path)
+        return
+
+    # 2. Migración normal del archivo suelto a la nueva carpeta /data/
+    if not os.path.exists(HASH_FILE) and os.path.isfile(OLD_PATH):
         try:
-            with open(HASH_FILE, "r") as f:
+            os.makedirs(os.path.dirname(HASH_FILE), exist_ok=True)
+            import shutil
+            shutil.copy(OLD_PATH, HASH_FILE)
+            print(f"INFO: Se han migrado los hashes automáticamente desde {OLD_PATH}")
+        except Exception as e:
+            print(f"AVISO: No se pudo migrar automáticamente: {e}")
+
+    load_from_path(HASH_FILE)
+
+def load_from_path(path):
+    global HASH_MAP_TTH_TO_HEX, HASH_MAP_HEX_TO_TTH, BUNDLE_MAP_ID_TO_TTH, FINISHED_BUNDLES_CACHE
+    if os.path.exists(path) and os.path.isfile(path):
+        try:
+            with open(path, "r") as f:
                 content = f.read().strip()
-                if not content:
-                    content = "{}"
+                if not content: content = "{}"
                 data = json.loads(content)
                 
                 if "hashes" in data:
@@ -72,18 +102,17 @@ def load_hashes():
                     FINISHED_BUNDLES_CACHE = data.get("finished", {})
                 else:
                     HASH_MAP_TTH_TO_HEX = data
-                    BUNDLE_MAP_ID_TO_TTH = {}
-                    BUNDLE_MAP_ID_TO_CAT = {}
-                    FINISHED_BUNDLES_CACHE = {}
                 
                 HASH_MAP_HEX_TO_TTH = {v: k for k, v in HASH_MAP_TTH_TO_HEX.items()}
-                print(f"INFO: {len(HASH_MAP_TTH_TO_HEX)} hashes, {len(BUNDLE_MAP_ID_TO_TTH)} bundles y {len(FINISHED_BUNDLES_CACHE)} finished cargados.")
+                print(f"INFO: Carga completada desde {path}: {len(HASH_MAP_TTH_TO_HEX)} hashes.")
         except Exception as e:
-            print(f"ERROR: No se pudo cargar el archivo de hashes: {e}")
+            print(f"ERROR: No se pudo leer {path}: {e}")
 
 def save_hashes():
     with FILE_LOCK:
         try:
+            # Asegurar que el directorio de datos existe
+            os.makedirs(os.path.dirname(HASH_FILE), exist_ok=True)
             data = {
                 "hashes": HASH_MAP_TTH_TO_HEX,
                 "bundles": BUNDLE_MAP_ID_TO_TTH,
@@ -112,9 +141,6 @@ def get_hex_hash(tth):
 load_hashes()
 
 def get_auth_headers():
-    if AIRDCPP_API_KEY:
-        return {"Authorization": f"Bearer {AIRDCPP_API_KEY}"}
-    
     if AIRDCPP_USER and AIRDCPP_PASS:
         auth_str = f"{AIRDCPP_USER}:{AIRDCPP_PASS}"
         encoded_auth = base64.b64encode(auth_str.encode()).decode()
@@ -177,6 +203,7 @@ def startup_event():
     print("--- Test de Conectividad Finalizado ---")
 
 @app.get("/api")
+@app.get("/torznab")
 @app.get("/torznab/api")
 def torznab_api(
     request: Request,

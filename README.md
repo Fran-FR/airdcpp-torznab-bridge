@@ -15,22 +15,19 @@ Este proyecto actúa como un puente (bridge) entre **AirDC++** y las aplicacione
 
 1. **Requisitos**: Tener Docker y Docker Compose instalados.
 2. **Configuración**:
-   - Copia el archivo `.env.example` (o crea uno nuevo) y renómbralo a `.env`.
-   - Modifica los valores con tus credenciales de AirDC++:
-     ```env
-     AIRDCPP_URL=http://tu-ip:5600
-     AIRDCPP_USER=tu-usuario
-     AIRDCPP_PASS=tu-contraseña
-     ```
+   - Descarga o crea un archivo `docker-compose.yml` (puedes copiar el contenido de este repositorio).
+   - Crea un archivo `.env` en la misma carpeta basándote en el `.env.example`.
+   - Modifica los valores con tus credenciales de AirDC++ y tu clave de TMDB (opcional).
 3. **Levantar el servicio**:
    ```bash
-   docker-compose up -d --build
+   docker compose up -d
    ```
+   *Esto descargará automáticamente la última imagen oficial desde GitHub Container Registry.*
 
 ## ⚙️ Configuración en Radarr/Sonarr
 
 ### 1. Indexador (Torznab)
-- **URL**: `http://localhost:8000/torznab/api`
+- **URL**: `http://localhost:8000/torznab`
 - **API Key**: (Cualquier valor, el puente no la valida)
 - **Categorías**: 5000 (TV), 2000 (Movies).
 
