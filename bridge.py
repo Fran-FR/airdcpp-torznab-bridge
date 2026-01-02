@@ -9,6 +9,7 @@ import xml.sax.saxutils as saxutils
 import hashlib
 import xml.etree.ElementTree as ET
 import unicodedata
+import threading
 from fastapi import FastAPI, Request, Response, Query
 from fastapi.responses import JSONResponse
 from typing import Optional
@@ -35,18 +36,24 @@ AIRDCPP_URL = os.getenv("AIRDCPP_URL", "http://localhost:5600")
 AIRDCPP_API_KEY = os.getenv("AIRDCPP_API_KEY", "")
 AIRDCPP_USER = os.getenv("AIRDCPP_USER", "")
 AIRDCPP_PASS = os.getenv("AIRDCPP_PASS", "")
-TMDB_API_KEY = os.getenv("TMDB_API_KEY", "f637fd7b5ef5b4c62249b8d67122a0f6")
+TMDB_API_KEY = "f637fd7b5ef5b4c62249b8d67122a0f6"
 
 SESSION_TOKEN = None
 
 # Persistencia de Hashes TTH <-> Hex y Bundle IDs
-HASH_FILE = "/app/bridge_hashes.json"
+HASH_FILE = "/app/data/bridge_hashes.json"
 HASH_MAP_TTH_TO_HEX = {}
 HASH_MAP_HEX_TO_TTH = {}
 BUNDLE_MAP_ID_TO_TTH = {}  # Mapeo de AirDC++ Bundle ID -> TTH
 BUNDLE_MAP_ID_TO_CAT = {}  # Mapeo de AirDC++ Bundle ID -> Categoría (radarr/sonarr)
 FINISHED_BUNDLES_CACHE = {} # Mapeo de TTH -> Bundle Info finalizado
 TITLE_CACHE = {} # Mapeo de ID -> [Nombres]
+KNOWN_CATEGORIES = ["airdcpp", "radarr", "sonarr"] # Categorías permitidas en Radarr/Sonarr
+
+# Semáforo para limitar búsquedas simultáneas en AirDC++ (1 por sesión para evitar kicks)
+GLOBAL_SEARCH_LOCK = threading.Semaphore(1)
+# Lock para proteger la escritura del archivo de hashes
+FILE_LOCK = threading.Lock()
 
 def load_hashes():
     global HASH_MAP_TTH_TO_HEX, HASH_MAP_HEX_TO_TTH, BUNDLE_MAP_ID_TO_TTH, FINISHED_BUNDLES_CACHE
@@ -75,19 +82,24 @@ def load_hashes():
             print(f"ERROR: No se pudo cargar el archivo de hashes: {e}")
 
 def save_hashes():
-    try:
-        data = {
-            "hashes": HASH_MAP_TTH_TO_HEX,
-            "bundles": BUNDLE_MAP_ID_TO_TTH,
-            "categories": BUNDLE_MAP_ID_TO_CAT,
-            "finished": FINISHED_BUNDLES_CACHE
-        }
-        with open(HASH_FILE, "w") as f:
-            json.dump(data, f)
-    except Exception as e:
-        print(f"ERROR: No se pudo guardar el archivo de hashes: {e}")
+    with FILE_LOCK:
+        try:
+            data = {
+                "hashes": HASH_MAP_TTH_TO_HEX,
+                "bundles": BUNDLE_MAP_ID_TO_TTH,
+                "categories": BUNDLE_MAP_ID_TO_CAT,
+                "finished": FINISHED_BUNDLES_CACHE
+            }
+            with open(HASH_FILE, "w") as f:
+                json.dump(data, f)
+        except Exception as e:
+            print(f"ERROR: No se pudo guardar el archivo de hashes: {e}")
 
 def get_hex_hash(tth):
+    if not tth:
+        print("DEBUG: get_hex_hash recibió un TTH vacío o None.")
+        return ""
+    
     if tth in HASH_MAP_TTH_TO_HEX:
         return HASH_MAP_TTH_TO_HEX[tth]
     
@@ -119,6 +131,34 @@ def normalize_text(text):
     text = "".join([c for c in text if unicodedata.category(c) != 'Mn'])
     return text.lower().strip()
 
+def clean_search_pattern(text):
+    """Limpia un nombre complejo para hacerlo más apto para búsqueda en el Hub."""
+    import re
+    if not text: return ""
+    
+    # 1. Quitar contenido entre corchetes y paréntesis (tags, años, etc)
+    text = re.sub(r'\[.*?\]', '', text)
+    text = re.sub(r'\(.*?\)', '', text)
+    
+    # 2. Reemplazar puntos, guiones bajos y guiones por espacios
+    text = text.replace(".", " ").replace("_", " ").replace("-", " ")
+    
+    # 3. Quitar indicadores de temporada (problemáticos para búsqueda literal)
+    text = re.sub(r'\b(Temporada|Season|Staffel|Temp|Part|Pt|S|T)\s*\d+\b', '', text, flags=re.IGNORECASE)
+    
+    # 4. Quitar tags comunes de release
+    text = re.sub(r'\b(NF|WEB-DL|HMAX|DSNP|AMZN|AVC|DD\+|Atmos|HDO|1080p|720p|x264|x265|HEVC|Dual|PACK)\b', '', text, flags=re.IGNORECASE)
+    
+    # 5. Quedarse con las primeras 4 palabras (título base)
+    words = text.split()
+    clean = " ".join(words[:4]).strip()
+    
+    # Si la limpieza ha borrado TODO, devolvemos las primeras palabras del original
+    if not clean and words:
+        return " ".join(words[:3]) or text
+        
+    return clean
+
 @app.on_event("startup")
 def startup_event():
     print(f"--- Iniciando Test de Conectividad ---")
@@ -138,7 +178,7 @@ def startup_event():
 
 @app.get("/api")
 @app.get("/torznab/api")
-async def torznab_api(
+def torznab_api(
     request: Request,
     t: str, 
     q: Optional[str] = None, 
@@ -156,11 +196,8 @@ async def torznab_api(
     
     if t == "caps":
         return Response(content=get_caps_xml().strip(), media_type="application/xml")
-    
     if t in ["search", "tvsearch", "movie", "movie-search"]:
-        query_list = []
-        
-        # 0. Detectar año en Q (para películas/series)
+        # 0. Detectar año y LIMPIAR patrones de temporada
         detected_year = None
         if q and q.lower() != "none":
             import re
@@ -169,76 +206,65 @@ async def torznab_api(
             if year_match:
                 detected_year = year_match.group(1)
                 print(f"DEBUG: Año detectado por regex en query: {detected_year}")
-        
-        # 1. Tratar de resolver por IDs si vienen
-        if imdbid or tvdbid or tmdbid:
-            resolved_names = resolve_titles_by_id(imdbid=imdbid, tvdbid=tvdbid, tmdbid=tmdbid)
-            for name in resolved_names:
-                if name not in query_list:
-                    query_list.append(name)
-        
-        # 2. Si no tenemos nombres resueltos pero tenemos Q, intentamos resolver por nombre
-        if not query_list and q and q.lower() != "none":
-            print(f"> No hay IDs, intentando resolución por nombre para: '{q}'")
-            resolved_names = resolve_titles_by_name(q)
-            for name in resolved_names:
-                if name not in query_list:
-                    query_list.append(name)
-
-        # 3. Añadir el nombre original de Radarr AL FINAL si no está en la lista (como fallback)
-        if q and q.lower() != "none" and q not in query_list:
-            query_list.append(q)
             
-        # 4. GENERAR VARIANTES SIN ACENTOS (CRÍTICO PARA HUBS)
-        normalized_variants = []
-        for name in query_list:
-            norm = normalize_text(name)
-            if norm and norm not in [n.lower() for n in query_list]:
-                # Buscamos el original capitalizado si es posible, o simplemente el norm
-                normalized_variants.append(norm)
-        
-        # Insertar variantes normalizadas justo después de sus originales
-        # O simplemente al final de la tanda de prioridad
-        all_base_names = []
-        for name in query_list:
-            all_base_names.append(name)
-            norm = normalize_text(name)
-            if norm != name.lower() and norm not in [n.lower() for n in all_base_names]:
-                all_base_names.append(norm)
+            # IMPORTANTE: Si es búsqueda de TV, quitamos patrones tipo S01, T01 para que el Hub encuentre de todo
+            if t == "tvsearch" or (cat and cat.startswith("5")):
+                q_old = q
+                q = re.sub(r'\s[ST]\d{1,2}\b.*', '', q, flags=re.IGNORECASE).strip()
+                if q != q_old:
+                    print(f"DEBUG: Query TV limpiada de temporada: '{q_old}' -> '{q}'")
 
-        # Si al final no hay nada útil, cancelamos
-        if not all_base_names:
+        # 1. Recolectar nombres base (Original + Traducidos)
+        base_names = []
+        if imdbid or tvdbid or tmdbid:
+            base_names.extend(resolve_titles_by_id(imdbid=imdbid, tvdbid=tvdbid, tmdbid=tmdbid))
+        
+        if q and q.lower() != "none":
+            if not base_names:
+                base_names.extend(resolve_titles_by_name(q))
+            if q not in base_names: base_names.append(q)
+
+        # 2. Dedulplicar nombres base preservando caracteres (ñ, acentos)
+        unique_bases = []
+        seen_lowers = set()
+        for name in base_names:
+            low = name.lower().strip()
+            if low and low not in seen_lowers:
+                unique_bases.append(name.strip())
+                seen_lowers.add(low)
+
+        if not unique_bases:
              print(f">>> AVISO: Búsqueda sin nombres resolubles (t={t}). Cancelando.")
              return Response(content=get_test_xml().strip(), media_type="application/xml")
 
-        # 5. Formatear queries con Temporada/Episodio
+        # 3. Formatear queries finales (Temporada/Episodio/Año)
         final_queries = []
         is_season_search = (season is not None and ep is None)
         
-        if season and ep:
-            for base_name in all_base_names:
-                final_queries.append(f"{base_name} S{season.zfill(2)}E{ep.zfill(2)}")
-        elif season:
-            # OPTIMIZACIÓN: Solo buscamos los nombres base (series) 
-            # y luego filtramos por temporada en el resultado
-            final_queries = all_base_names
-        else:
-            # Si es película o búsqueda genérica, y tenemos año, lo añadimos si no está
-            is_movie_search = (t in ["movie", "movie-search"] or (cat and cat.startswith("2")))
-            if detected_year and is_movie_search:
-                final_queries = []
-                for name in all_base_names:
-                    # Si el nombre ya contiene el año (ej: el original), no lo duplicamos
-                    if detected_year not in name:
-                        final_queries.append(f"{name} {detected_year}")
-                    else:
-                        final_queries.append(name)
+        for base in unique_bases:
+            if season and ep:
+                final_queries.append(f"{base} S{season.zfill(2)}E{ep.zfill(2)}")
+            elif season:
+                final_queries.append(base)
             else:
-                final_queries = all_base_names
+                is_movie = (t in ["movie", "movie-search"] or (cat and cat.startswith("2")))
+                if detected_year and is_movie:
+                    if not base.endswith(detected_year):
+                        final_queries.append(f"{base} {detected_year}")
+                    final_queries.append(base)
+                else:
+                    final_queries.append(base)
+
+        # 4. Dedulplicar queries finales (orden preservado)
+        dedup_queries = []
+        for fq in final_queries:
+            if fq not in dedup_queries:
+                dedup_queries.append(fq)
             
-        results = search_airdcpp(final_queries, is_season_search=is_season_search, season_num=season)
+        with GLOBAL_SEARCH_LOCK:
+            results = search_airdcpp(dedup_queries, is_season_search=is_season_search, season_num=season)
         
-        # Construimos el base_url usando el host real que recibió el API
+        # Construimos el base_url
         host = request.headers.get("host", "localhost:8000")
         scheme = request.url.scheme
         base_url = f"{scheme}://{host}"
@@ -339,7 +365,7 @@ def resolve_titles_by_id(imdbid=None, tvdbid=None, tmdbid=None):
             
     return titles
 
-def resolve_titles_via_tmdb(imdbid=None, tmdbid=None, query=None):
+def resolve_titles_via_tmdb(imdbid=None, tmdbid=None, query=None, year=None):
     """Consulta nombres en español usando TheMovieDB (TMDB)."""
     if not TMDB_API_KEY: return []
     
@@ -350,11 +376,9 @@ def resolve_titles_via_tmdb(imdbid=None, tmdbid=None, query=None):
         
         if tmdbid:
             # Búsqueda directa por ID de TMDB (peli o serie)
-            # Primero probamos como movie
-            r = requests.get(f"{base_url}/movie/{tmdbid}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles", timeout=5)
+            r = requests.get(f"{base_url}/movie/{tmdbid}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles,translations", timeout=5)
             if r.status_code != 200:
-                # Si falla, probamos como tv
-                r = requests.get(f"{base_url}/tv/{tmdbid}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles", timeout=5)
+                r = requests.get(f"{base_url}/tv/{tmdbid}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles,translations", timeout=5)
         elif imdbid:
             # Búsqueda por External ID (IMDB)
             find_url = f"{base_url}/find/{imdbid}?api_key={TMDB_API_KEY}&language=es-ES&external_source=imdb_id"
@@ -366,35 +390,67 @@ def resolve_titles_via_tmdb(imdbid=None, tmdbid=None, query=None):
                     show_id = results[0]["id"]
                     is_tv = "tv_results" in fdata and fdata["tv_results"]
                     type_str = "tv" if is_tv else "movie"
-                    r = requests.get(f"{base_url}/{type_str}/{show_id}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles", timeout=5)
+                    r = requests.get(f"{base_url}/{type_str}/{show_id}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles,translations", timeout=5)
         elif query:
-            # Búsqueda por nombre (multi-search)
-            search_url = f"{base_url}/search/multi?api_key={TMDB_API_KEY}&language=es-ES&query={query}"
-            sr = requests.get(search_url, timeout=5)
-            if sr.status_code == 200:
-                sdata = sr.json()
-                results = sdata.get("results", [])
-                if results:
-                    show_id = results[0]["id"]
-                    type_str = results[0].get("media_type", "movie")
-                    r = requests.get(f"{base_url}/{type_str}/{show_id}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles", timeout=5)
+            # Búsqueda por nombre. Si hay año, ayuda mucho a la precisión.
+            search_params = {
+                "api_key": TMDB_API_KEY,
+                "language": "es-ES",
+                "query": query,
+                "include_adult": "false"
+            }
+            if year:
+                # Probamos primero como película con año
+                search_url = f"{base_url}/search/movie"
+                search_params["primary_release_year"] = year
+                sr = requests.get(search_url, params=search_params, timeout=5)
+                if sr.status_code == 200 and sr.json().get("results"):
+                    results = sr.json()["results"]
+                else:
+                    # Si falla o no hay resultados, probamos multi-search (incluye series)
+                    search_url = f"{base_url}/search/multi"
+                    if "primary_release_year" in search_params: del search_params["primary_release_year"]
+                    search_params["query"] = f"{query} {year}"
+                    sr = requests.get(search_url, params=search_params, timeout=5)
+                    results = sr.json().get("results", [])
+            else:
+                search_url = f"{base_url}/search/multi"
+                sr = requests.get(search_url, params=search_params, timeout=5)
+                results = sr.json().get("results", [])
+
+            if results:
+                show_id = results[0]["id"]
+                media_type = results[0].get("media_type", "movie")
+                r = requests.get(f"{base_url}/{media_type}/{show_id}?api_key={TMDB_API_KEY}&language=es-ES&append_to_response=alternative_titles,translations", timeout=5)
 
         if r and r.status_code == 200:
             data = r.json()
-            # Nombre principal en español (si lo hay)
-            if "title" in data: titles.append(data["title"])
-            elif "name" in data: titles.append(data["name"])
+            # 1. Nombre principal en español
+            name = data.get("title") or data.get("name")
+            if name: titles.append(name)
             
-            # Títulos alternativos
+            # 2. Títulos alternativos en España (Solo Castellano)
             alt = data.get("alternative_titles", {})
-            # TMDB devuelve 'titles' para movies y 'results' para tv
             alt_list = alt.get("titles", []) or alt.get("results", [])
             for a in alt_list:
+                # Solo queremos títulos de España que sean en castellano (es)
+                # Ignoramos ca (catalán), eu (euskera), gl (gallego)
                 if a.get("iso_3166_1") == "ES":
-                    t = a.get("title") or a.get("name")
+                    # TMDB a veces no da el iso_639_1 en alternative_titles, 
+                    # pero si no lo da, solemos confiar en que el principal es es.
+                    lang = a.get("iso_639_1", "es") 
+                    if lang == "es":
+                        t = a.get("title") or a.get("name")
+                        if t and t not in titles: titles.append(t)
+            
+            # 3. Traducciones (Solo Castellano)
+            trans = data.get("translations", {}).get("translations", [])
+            for tr in trans:
+                if tr.get("iso_3166_1") == "ES" and tr.get("iso_639_1") == "es":
+                    t = tr.get("data", {}).get("title") or tr.get("data", {}).get("name")
                     if t and t not in titles: titles.append(t)
             
-            print(f"> TMDB resolvió: {titles}")
+            print(f"> TMDB resolvió para '{query or tmdbid or imdbid}' (Filtrado Español): {titles}")
     except Exception as e:
         print(f"Error en TMDB: {e}")
         
@@ -403,7 +459,10 @@ def resolve_titles_via_tmdb(imdbid=None, tmdbid=None, query=None):
 def resolve_titles_by_name(query):
     """Intenta encontrar una serie/peli por nombre y sacar sus AKAs."""
     import re
-    # 1. Limpiar el nombre (quitar año en (2024) o 2024)
+    # 1. Limpiar el nombre y detectar año
+    year_match = re.search(r'\s(\d{4})$', query)
+    detected_year = year_match.group(1) if year_match else None
+    
     clean_q = query.split("(")[0].strip()
     clean_q = re.sub(r'\s\d{4}$', '', clean_q).strip()
     
@@ -412,7 +471,7 @@ def resolve_titles_by_name(query):
         
     # 1. Intentar TMDB primero si hay KEY (es mucho mejor para pelis)
     if TMDB_API_KEY:
-        titles = resolve_titles_via_tmdb(query=clean_q)
+        titles = resolve_titles_via_tmdb(query=clean_q, year=detected_year)
         if titles:
             TITLE_CACHE[clean_q] = titles
             return titles
@@ -483,7 +542,7 @@ def extract_titles_from_tvmaze_show(show_data):
                     if not name: continue
                     
                     # Priorizamos alias en español
-                    if ak.get("country", {}).get("code") == "ES":
+                    if (ak.get("country") or {}).get("code") == "ES":
                         if name not in spanish_titles:
                             spanish_titles.append(name)
                     elif not ak.get("country"): # Alias general
@@ -497,15 +556,14 @@ def extract_titles_from_tvmaze_show(show_data):
 
 def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
     import re
+    from concurrent.futures import ThreadPoolExecutor
     headers = get_auth_headers()
     
     # Preparamos el regex para filtrar por temporada si es necesario
     season_regex = None
     if is_season_search and season_num:
         s_int = int(season_num)
-        s_pad = str(s_int).zfill(2)
         # Patrón mejorado: T1, S1, Season 1, Temporada 1, Temp 1, Pt 1, Part 1
-        # Aceptamos separadores comunes como espacio, punto, guión o nada
         pattern = rf'(?:[ST]|Temporada|Season|Staffel|Temp|Pt|Part|P)\s*[.\-_]?\s*0?{s_int}\b'
         season_regex = re.compile(pattern, re.IGNORECASE)
         print(f"> Filtro regex para temporada {season_num} activado: {pattern}")
@@ -534,129 +592,195 @@ def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
         if q not in final_queries:
             final_queries.append(q)
 
-    final_results = []
-    print(f"--- Iniciando búsqueda AirDC++ con {len(final_queries)} variantes ---")
+    print(f"--- Iniciando búsqueda AirDC++ con {len(final_queries)} variantes en paralelo ---")
+
+    all_results = []
     
-    for q_attempt in final_queries:
-        print(f"> Intentando con variant: '{q_attempt}'")
+    def search_variant(q_attempt):
+        variant_results = []
         try:
+            print(f"> Lanzando búsqueda paralela: '{q_attempt}'")
             # 1. Crear instancia de búsqueda
             res = requests.post(f"{AIRDCPP_URL}/api/v1/search", json={}, headers=headers, timeout=10)
             res.raise_for_status()
             instance_id = res.json()["id"]
             
             # 2. Lanzar la búsqueda real
-            # Filtramos por directorio y tamaño mínimo en el hub para maximizar la probabilidad de encontrar packs
             query_data = {"pattern": q_attempt}
             if is_season_search:
                 query_data["type_id"] = "directory"
                 query_data["size_min"] = 1024 * 1024 * 1024 # 1GB
-                print(f"  -> Búsqueda de temporada: Filtrando por Directorios > 1GB en el hub.")
             
             search_payload = {"query": query_data, "hub_urls": []}
             hub_res = requests.post(f"{AIRDCPP_URL}/api/v1/search/{instance_id}/hub_search", json=search_payload, headers=headers, timeout=10)
             hub_res.raise_for_status()
             
-            # 3. Polling (10 intentos, check cada 2s = 20s total)
+            # 3. Polling optimizado (cada 1s, máx 15s)
             raw_results = []
-            max_results = 1000 # Aumentamos el límite para no perder el MEGAPACK si hay mucho ruido
-            for i in range(10):
-                time.sleep(2)
-                results_res = requests.get(f"{AIRDCPP_URL}/api/v1/search/{instance_id}/results/0/{max_results}", headers=headers, timeout=10)
-                if results_res.status_code == 200:
-                    current_results = results_res.json()
-                    if len(current_results) > len(raw_results):
-                        raw_results = current_results
-                        print(f"  -> {len(raw_results)} resultados brutos (en proceso...)")
-                    elif len(raw_results) > 0 and i > 5:
-                        break
+            max_results = 2000
+            last_stable_count = -1
+            stable_cycles = 0
             
-            print(f"> ¡{len(raw_results)} resultados brutos totales encontrados para '{q_attempt}'!")
+            for i in range(15):
+                time.sleep(1)
+                try:
+                    results_res = requests.get(f"{AIRDCPP_URL}/api/v1/search/{instance_id}/results/0/{max_results}", headers=headers, timeout=5)
+                    if results_res.status_code == 200:
+                        current_results = results_res.json()
+                        current_count = len(current_results)
+                        raw_results = current_results
+                        
+                        # Lógica de estabilidad: salir solo si el conteo se mantiene igual 
+                        # durante al menos 4 segundos (ciclos) y tenemos algún resultado.
+                        if current_count > 0:
+                            if current_count == last_stable_count:
+                                stable_cycles += 1
+                            else:
+                                stable_cycles = 0
+                                
+                            if stable_cycles >= 4:
+                                print(f"  -> Búsqueda estabilizada en {current_count} resultados.")
+                                break
+                        
+                        last_stable_count = current_count
+                except Exception:
+                    continue
+            
+            print(f"  -> '{q_attempt}': {len(raw_results)} resultados brutos encontrados.")
             
             # 4. Limpiar instancia inmediatamente
             requests.delete(f"{AIRDCPP_URL}/api/v1/search/{instance_id}", headers=headers, timeout=5)
             
-            if raw_results:
-                # 5. Filtrar
-                video_extensions = ('.mkv', '.avi', '.mp4', '.m4v', '.mov', '.wmv', '.mpg', '.mpeg')
-                min_size = 1024 * 1024 * 1024 if is_season_search else 50 * 1024 * 1024
-                has_ep_pattern = re.search(r'[Ss]\d{2}[Ee]\d{2}', q_attempt)
+            # 5. Filtrar resultados de esta variante
+            video_extensions = ('.mkv', '.avi', '.mp4', '.m4v', '.mov', '.wmv', '.mpg', '.mpeg')
+            min_size = 100 * 1024 * 1024 if is_season_search else 50 * 1024 * 1024
+            has_ep_pattern = re.search(r'[Ss]\d{2}[Ee]\d{2}', q_attempt)
+            
+            for r in raw_results:
+                name_raw = r["name"]
+                name_lower = name_raw.lower()
+                name_norm = normalize_text(name_raw)
                 
-                variant_success_count = 0
-                for r in raw_results:
-                    name_raw = r["name"]
+                raw_type = r.get("type", "file")
+                item_type = raw_type.get("id", "file") if isinstance(raw_type, dict) else str(raw_type)
+                size_bytes = int(r["size"])
+                
+                if is_season_search:
+                    if item_type not in ["directory", "bundle"]: continue
+                    clean_name = name_norm.replace("-", " ").replace(".", " ").replace("_", " ")
+                    
+                    if season_regex:
+                        if not season_regex.search(clean_name):
+                            # print(f"DEBUG: Descartado por temporada: {name_raw}")
+                            continue
+                    
+                    # Formato para Sonarr: Inyectamos el SXX después del título de la serie para que sea estándar
+                    s_num = str(season_num or "").zfill(2)
+                    display_season_tag = f"S{s_num}"
+                    series_name = final_queries[0]
+                    
                     name_lower = name_raw.lower()
-                    name_norm = normalize_text(name_raw)
+                    series_lower = series_name.lower()
                     
-                    raw_type = r.get("type", "file")
-                    if isinstance(raw_type, dict):
-                        item_type = raw_type.get("id", "file")
-                    else:
-                        item_type = str(raw_type)
-                    
-                    size_bytes = int(r["size"])
-                    
-                    # SI es temporada completa, SOLO aceptamos directorios (bundles)
-                    if is_season_search:
-                        if item_type not in ["directory", "bundle"]:
-                            continue
-                        
-                        # Limpiar nombre para el regex
-                        clean_name = name_norm.replace("-", " ").replace(".", " ").replace("_", " ")
-                        if season_regex and not season_regex.search(clean_name):
-                             if "megapack" in name_lower or "grupohds" in name_lower:
-                                 print(f"DEBUG: '{name_raw}' descartado por regex de temporada {season_num}")
-                             continue
-                        
-                        # MEJORA: Si el nombre del resultado es muy genérico (ej: "Temporada 1"), 
-                        # le añadimos el nombre de la serie para que Sonarr lo reconozca.
-                        s_num = str(season_num or "").zfill(2)
-                        generic_names = [
-                            f"temporada {season_num}", f"temporada {s_num}",
-                            f"season {season_num}", f"season {s_num}",
-                            f"t{season_num}", f"t{s_num}",
-                            f"s{season_num}", f"s{s_num}",
-                            "temporada completa"
-                        ]
-                        if name_lower.strip() in generic_names:
-                             # Usamos el primer nombre de la lista de variantes como base-name (ej: "Cómo conocí...")
-                             display_name = f"{all_base_names[0]} - {name_raw}"
-                             print(f"  -> Renombrando resultado genérico: '{name_raw}' -> '{display_name}'")
+                    # Regex para detectar el tag de temporada redundante (S7, T7, Temporada 7...)
+                    s_clean_pattern = rf'(?:[ST]|Temporada|Season|Staffel|Temp|Pt|Part|P)\s*[.\-_]?\s*0?{season_num}\b'
+
+                    # Ver si el nombre del hub ya contiene ALGUNA de las variantes buscadas (español o inglés)
+                    matched_alias = None
+                    for q in final_queries:
+                        if q.lower() in name_lower:
+                            matched_alias = q
+                            break
+
+                    if matched_alias:
+                        # Si ya tiene un nombre de serie (sea cual sea), solo nos aseguramos de que tenga el SXX
+                        if display_season_tag.lower() in name_lower:
+                            display_name = name_raw
                         else:
-                             display_name = name_raw
-                    else:
-                        # Si NO es temporada, forzamos extensión de vídeo
-                        if not name_lower.endswith(video_extensions): continue
-                        display_name = name_raw
-                    
-                    if size_bytes < min_size:
-                        continue
-                    
-                    # Si la query actual tiene un patrón SxxExx, el nombre debe contenerlo
-                    if has_ep_pattern:
-                        pattern = has_ep_pattern.group(0).lower()
-                        if pattern not in name_lower.replace(".", " ").replace("-", " "):
-                            continue
+                            # Inyectar SXX tras el alias encontrado (+ año si existe)
+                            alias_lower = matched_alias.lower()
+                            idx = name_lower.find(alias_lower) + len(alias_lower)
                             
-                    final_results.append({
-                        "name": display_name,
-                        "size": size_bytes,
-                        "tth": r["tth"]
-                    })
-                    variant_success_count += 1
+                            # Si sigue el año "(2019)", lo incluimos en el prefijo
+                            year_match = re.search(r'^\s*\(?\d{4}\)?', name_raw[idx:])
+                            if year_match:
+                                idx += len(year_match.group(0))
+                            
+                            prefix = name_raw[:idx].strip()
+                            suffix = name_raw[idx:].strip()
+                            
+                            # Limpiar de la parte restante cualquier tag de temporada REDUNDANTE
+                            suffix = re.sub(s_clean_pattern, '', suffix, flags=re.IGNORECASE).strip()
+                            suffix = re.sub(r'^[\s.\-_]+', '', suffix) # Limpiar conectores
+                            
+                            if suffix:
+                                display_name = f"{prefix} {display_season_tag} {suffix}"
+                            else:
+                                display_name = f"{prefix} {display_season_tag}"
+                    else:
+                        # Si no coincide con ninguna variante conocida (ej: nombre genérico o alias raro)
+                        # Prependemos la primera variante (título principal)
+                        name_cleaned = re.sub(s_clean_pattern, '', name_raw, flags=re.IGNORECASE).strip()
+                        name_cleaned = re.sub(r'^[\s.\-_]+', '', name_cleaned)
+                        
+                        if name_cleaned:
+                            # Si tiene info extra, la conservamos
+                            display_name = f"{final_queries[0]} {display_season_tag} - {name_raw}"
+                        else:
+                            # Era solo un tag de temporada genérico
+                            display_name = f"{final_queries[0]} {display_season_tag}"
+                else:
+                    if not name_lower.endswith(video_extensions): continue
+                    display_name = name_raw
                 
-                if variant_success_count > 0:
-                    print(f"> Variante '{q_attempt}' aportó {variant_success_count} resultados.")
-                    # Si no es temporada, rompemos el bucle
-                    if not is_season_search:
-                         break
+                if size_bytes < min_size: continue
+                if has_ep_pattern and has_ep_pattern.group(0).lower() not in name_lower.replace(".", " ").replace("-", " "): continue
                 
-                # Pequeña pausa entre variantes
-                if q_attempt != final_queries[-1]:
-                    time.sleep(1)
-                    
+                # VALIDACIÓN / GENERACIÓN DE TTH
+                tth = r.get("tth")
+                if not tth:
+                    if item_type in ["directory", "bundle"]:
+                        # Usar el nombre de pantalla (que incluye la serie) para el TTH sintético 
+                        # Esto ayuda al fallback de búsqueda en qbit_add
+                        tth = f"SYNTH:{display_name}:{size_bytes}"
+                        print(f"DEBUG: Generado TTH sintético para carpeta: {tth}")
+                    else:
+                        print(f"DEBUG: Saltando archivo '{display_name}' por TTH vacío.")
+                        continue
+                        
+                variant_results.append({"name": display_name, "size": size_bytes, "tth": tth})
+                
         except Exception as e:
-            print(f"Error en intento de búsqueda '{q_attempt}': {e}")
+            print(f"Error en variante '{q_attempt}': {e}")
+        return variant_results
+
+    # Ejecución paralela con STAGGER (retraso entre lanzamientos)
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        futures = []
+        for q in final_queries:
+            futures.append(executor.submit(search_variant, q))
+            # Retraso crucial para que el HUB no nos ignore
+            time.sleep(2.5) 
+
+    # Recolectar resultados conforme terminan
+    for f in futures:
+        try:
+            res_list = f.result()
+            all_results.extend(res_list)
+        except Exception as e:
+            print(f"Error recuperando resultados de futuro: {e}")
+
+    # Eliminar duplicados por TTH
+    unique_results = []
+    seen_tths = set()
+    for r in all_results:
+        if r["tth"] not in seen_tths:
+            unique_results.append(r)
+            seen_tths.add(r["tth"])
+            
+    print(f"--- Búsqueda finalizada: {len(unique_results)} resultados únicos totales ---")
+    return unique_results
+
             
     # Eliminar duplicados por TTH
     unique_results = []
@@ -785,19 +909,19 @@ async def qbit_preferences():
 async def qbit_maindata(category: Optional[str] = None):
     # Radarr pide esto frecuentemente. Devolver la lista de torrents.
     torrents = {}
-    qbit_list = await qbit_info(category=category)
+    qbit_list = qbit_info(category=category)
     for t in qbit_list:
         torrents[t["hash"]] = t
         
     return {
         "torrents": torrents, 
         "full_update": True, 
-        "categories": {"airdcpp": {"name": "airdcpp", "savePath": "/downloads"}}
+        "categories": {cat: {"name": cat, "savePath": "/downloads"} for cat in KNOWN_CATEGORIES}
     }
 
 @app.get("/api/v2/torrents/categories")
 async def qbit_categories():
-    return {"airdcpp": {"name": "airdcpp", "savePath": "/downloads"}}
+    return {cat: {"name": cat, "savePath": "/downloads"} for cat in KNOWN_CATEGORIES}
 
 @app.post("/api/v2/torrents/createCategory")
 async def qbit_create_category():
@@ -869,7 +993,7 @@ async def qbit_delete(hash: str = Query(None), hashes: str = Query(None)):
     return Response(content="Ok.", media_type="text/plain")
 
 @app.get("/api/v2/torrents/info")
-async def qbit_info(category: Optional[str] = None):
+def qbit_info(category: Optional[str] = None):
     headers = get_auth_headers()
     try:
         # Consultamos la cola de AirDC++
@@ -970,7 +1094,8 @@ async def qbit_add(request: Request):
     headers = get_auth_headers()
     form_data = await request.form()
     
-    print(f"--- NUEVA SOLICITUD DE DESCARGA (qbit_add) ---")
+    with GLOBAL_SEARCH_LOCK:
+        print(f"--- NUEVA SOLICITUD DE DESCARGA (qbit_add) ---")
     print(f"Headers: {dict(request.headers)}")
     print(f"Form keys: {list(form_data.keys())}")
     
@@ -1000,6 +1125,12 @@ async def qbit_add(request: Request):
             
         if raw_hash:
             tth = HASH_MAP_HEX_TO_TTH.get(raw_hash, raw_hash)
+            
+            # BLOQUEO DE TTH VACÍO (pero permitir sintéticos)
+            if not tth or tth == "da39a3ee5e6b4b0d3255bfef95601890afd80709":
+                print(f"  - ERROR CRÍTICO: El hash recibido ({raw_hash}) corresponde a un TTH vacío. No se puede descargar.")
+                continue
+
             instance_id = None
             
             try:
@@ -1014,28 +1145,99 @@ async def qbit_add(request: Request):
                 res.raise_for_status()
                 instance_id = res.json()["id"]
                 
-                # 2. Lanzar búsqueda por TTH (lo más preciso)
-                search_payload = {
-                    "query": {
-                        "pattern": tth
-                    },
-                    "hub_urls": []
-                }
+                # 2. LANZAR BÚSQUEDA
+                if tth.startswith("SYNTH:"):
+                    # Si es sintético, buscamos por NOMBRE SIMPLIFICADO (fallback)
+                    parts = tth.split("SYNTH:")[1].rsplit(":", 1)
+                    full_name = parts[0]
+                    target_size_int = int(parts[1])
+                    
+                    search_pattern = clean_search_pattern(full_name)
+                    print(f"  - Usando fallback de búsqueda (Patrón: '{search_pattern}', Original: '{full_name}')")
+                    
+                    search_payload = {
+                        "query": {
+                            "pattern": search_pattern
+                        },
+                        "hub_urls": []
+                    }
+                else:
+                    # Búsqueda normal por TTH
+                    search_payload = {
+                        "query": {
+                            "pattern": tth
+                        },
+                        "hub_urls": []
+                    }
+                
                 requests.post(f"{AIRDCPP_URL}/api/v1/search/{instance_id}/hub_search", json=search_payload, headers=headers, timeout=10)
                 
-                # 3. Esperar a que el hub responda (polling corto)
-                print(f"  - Esperando resultados para {tth}...")
-                time.sleep(3)
+                # 3. Polling robusto de resultados (esperar a que se estabilice el conteo)
+                print(f"  - Esperando resultados...")
+                results = []
+                last_count = -1
+                for i in range(15):
+                    time.sleep(1)
+                    # Si es sintético, pedimos más para filtrar el mejor match manual
+                    max_results_to_fetch = 2000 if tth.startswith("SYNTH:") else 1
+                    try:
+                        results_res = requests.get(f"{AIRDCPP_URL}/api/v1/search/{instance_id}/results/0/{max_results_to_fetch}", headers=headers, timeout=5)
+                        if results_res.status_code == 200:
+                            current_results = results_res.json()
+                            current_count = len(current_results)
+                            results = current_results
+                            
+                            # Salida temprana si el conteo se estabiliza (al menos 6 ciclos)
+                            if current_count > 0 and i > 6:
+                                if current_count == last_count:
+                                    break
+                                
+                            last_count = current_count
+                    except:
+                        continue
                 
-                # 4. Obtener el primer resultado
-                results_res = requests.get(f"{AIRDCPP_URL}/api/v1/search/{instance_id}/results/0/1", headers=headers, timeout=10)
-                results = results_res.json()
-                
+                selected_result = None
                 if results:
-                    result_id = results[0]["id"]
-                    print(f"  - Resultado encontrado ({result_id}). Iniciando descarga...")
+                    if tth.startswith("SYNTH:"):
+                        # Filtrar el mejor match para el sintético
+                        parts = tth.split("SYNTH:")[1].rsplit(":", 1)
+                        target_name = parts[0]
+                        target_size_int = int(parts[1])
+                        
+                        print(f"  - Analizando {len(results)} resultados de búsqueda para match con Size: {target_size_int}...")
+                        for r in results:
+                            r_size_raw = r.get("size", 0)
+                            r_size_int = int(float(r_size_raw))
+                            r_name = r.get("name")
+                            
+                            # Obtener tipo para filtrar
+                            r_type_raw = r.get("type", "file")
+                            r_type = r_type_raw.get("id", "file") if isinstance(r_type_raw, dict) else str(r_type_raw)
+                            
+                            # Ignorar archivos pequeños (solo carpetas o bundles grandes)
+                            if r_type not in ["directory", "bundle"] and r_size_int < 1024*1024*1024:
+                                continue
+
+                            # Intentar match por tamaño exacto (lo más fiable)
+                            if r_size_int == target_size_int:
+                                print(f"  - Match encontrado por tamaño exacto! ({r_name})")
+                                selected_result = r
+                                break
+                            
+                            # Fallback: coincidencia cercana (1MB) y nombre parecido
+                            if r_size_int > 0 and abs(r_size_int - target_size_int) < 1024 * 1024:
+                                if target_name[:10].lower() in r_name.lower():
+                                    print(f"  - Match cercano encontrado (dif: {abs(r_size_int - target_size_int)} bytes)")
+                                    selected_result = r
+                                    break
+                    else:
+                        selected_result = results[0]
+
+                if selected_result:
+                    result_id = selected_result["id"]
+                    print(f"  - Resultado encontrado ({result_id}: {selected_result['name']}). Iniciando descarga...")
                     
-                    # 5. Ejecutar descarga (Prioridad 3 = Normal/Activa)
+                    # 5. Ejecutar descarga
                     dl_res = requests.post(
                         f"{AIRDCPP_URL}/api/v1/search/{instance_id}/results/{result_id}/download", 
                         json={"priority": 3}, 
@@ -1049,12 +1251,17 @@ async def qbit_add(request: Request):
                         if "bundle_info" in dl_data:
                             new_bundle_id = str(dl_data["bundle_info"]["id"])
                             cat = form_data.get("category", "radarr")
+                            
+                            # Registrar categoría si es nueva
+                            if cat not in KNOWN_CATEGORIES:
+                                KNOWN_CATEGORIES.append(cat)
+                                
                             BUNDLE_MAP_ID_TO_TTH[new_bundle_id] = tth
                             BUNDLE_MAP_ID_TO_CAT[new_bundle_id] = cat
                             save_hashes()
                             print(f"  - Mapeo guardado: Bundle {new_bundle_id} -> TTH {tth} (Cat: {cat})")
                 else:
-                    print(f"  - ERROR: No se encontraron fuentes en los hubs para el TTH {tth} tras 3s.")
+                    print(f"  - ERROR: No se encontraron fuentes adecuadas en los hubs para el TTH {tth} tras la búsqueda de fallback.")
                     
             except Exception as e:
                 print(f"  - ERROR procesando {tth}: {e}")
