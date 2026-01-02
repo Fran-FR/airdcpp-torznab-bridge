@@ -7,7 +7,6 @@ on:
       - 'README.md'
       - '.gitignore'
       - '.env.example'
-      - '.github/**'
 
 env:
   REGISTRY: ghcr.io
@@ -23,9 +22,6 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Log in to the Container registry
-        uses: actions/checkout@v4 # Necesario para persistir el contexto si fuese necesario
         
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
