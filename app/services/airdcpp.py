@@ -85,7 +85,7 @@ def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
                                 stable_cycles = 0
                                 
                             if stable_cycles >= 4:
-                                logger.debug(f"Búsqueda '{q_attempt}' estabilizada en {current_count} resultados.")
+                                logger.info(f"Búsqueda '{q_attempt}' estabilizada en {current_count} resultados brutos.")
                                 break
                         
                         last_stable_count = current_count
@@ -166,6 +166,8 @@ def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
                         continue
                         
                 variant_results.append({"name": display_name, "size": size_bytes, "tth": tth})
+            
+            logger.info(f"  -> '{q_attempt}': {len(variant_results)} resultados válidos de {len(raw_results)} encontrados.")
                 
         except Exception as e:
             logger.error(f"Error en variante '{q_attempt}': {e}")
