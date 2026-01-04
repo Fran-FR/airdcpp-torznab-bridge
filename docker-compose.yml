@@ -1,8 +1,8 @@
 services:
   # El Bridge personalizado
   airdcpp-bridge:
-    image: ghcr.io/antaneyes/airdcpp-torznab-bridge:latest
-    # build: . # Descomentar para desarrollo local
+    # image: ghcr.io/antaneyes/airdcpp-torznab-bridge:latest
+    build: . 
     container_name: airdcpp-bridge
     ports:
       - 8000:8000
@@ -10,6 +10,7 @@ services:
       - AIRDCPP_URL=${AIRDCPP_URL}
       - AIRDCPP_USER=${AIRDCPP_USER}
       - AIRDCPP_PASS=${AIRDCPP_PASS}
+      - TMDB_API_KEY=${TMDB_API_KEY}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
