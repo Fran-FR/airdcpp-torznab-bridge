@@ -186,12 +186,20 @@ def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
         except Exception as e:
             logger.error(f"Error recuperando resultados de futuro: {e}")
 
-    unique_results = []
-    seen_tths = set()
+    # Eliminar duplicados por TTH, pero PREFIRIENDO el nombre más largo/descriptivo
+    tth_groups = {}
     for r in all_results:
-        if r["tth"] not in seen_tths:
-            unique_results.append(r)
-            seen_tths.add(r["tth"])
+        tth = r.get("tth")
+        if not tth: continue
+        
+        if tth not in tth_groups:
+            tth_groups[tth] = r
+        else:
+            # Ganador simple: el nombre más largo
+            if len(r["name"]) > len(tth_groups[tth]["name"]):
+                tth_groups[tth] = r
+            
+    unique_results = list(tth_groups.values())
             
     logger.info(f"Búsqueda finalizada: {len(unique_results)} resultados únicos totales")
     return unique_results

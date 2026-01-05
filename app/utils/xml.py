@@ -25,8 +25,10 @@ def format_torznab_results(results, base_url, season=None, ep=None):
         fake_hash = get_hex_hash(res['tth'])
         
         # URL de descarga real (HTTP) con extensión fake para felicidad de Radarr
-        download_url = f"{base_url}/download/{fake_hash}.torrent?name={saxutils.quoteattr(res['name'])[1:-1]}"
-        fake_magnet = f"magnet:?xt=urn:btih:{fake_hash}&dn={saxutils.quoteattr(res['name'])[1:-1]}&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
+        import urllib.parse
+        safe_name = urllib.parse.quote(res['name'])
+        download_url = f"{base_url}/download/{fake_hash}.torrent?name={safe_name}"
+        fake_magnet = f"magnet:?xt=urn:btih:{fake_hash}&dn={safe_name}&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce"
         
         ET.SubElement(item, "link").text = fake_magnet
         ET.SubElement(item, "description").text = "AirDC++ Result"

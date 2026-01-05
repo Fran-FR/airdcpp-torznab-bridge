@@ -1,8 +1,9 @@
 from fastapi import FastAPI, Request
+import time
+import requests
 from app.routers import general, torznab, qbittorrent
 from app.services.airdcpp import AIRDCPP_URL, get_auth_headers
 from app.core.logging import setup_logging, get_logger
-import requests
 
 # Inicializar logging
 setup_logging()
@@ -11,30 +12,45 @@ logger = get_logger("app.main")
 app = FastAPI(title="AirDC++ Torznab/qBit Bridge")
 
 @app.middleware("http")
-async def log_requests(request: Request, call_next):
-    host = request.headers.get("host", "localhost:8000")
-    # logger.debug(f">>> REQ: {request.method} {request.url}") # Opcional: demasiado ruido para INFO
+async def session_middleware(request: Request, call_next):
+    start_time = time.time()
     response = await call_next(request)
+    duration = time.time() - start_time
+    
+    path = request.url.path
+    # Rutas ruidosas de Radarr/Sonarr
+    noisy_paths = ["/api/v2/app/webapiVersion", "/api/v2/app/preferences", "/api/v2/torrents/info"]
+    
+    log_msg = f"RES: {request.method} {path} - Status: {response.status_code} - Tiempo: {duration:.2f}s"
+    
+    # Lógica de niveles:
+    # 1. Si es un error, siempre INFO
+    if response.status_code >= 400:
+        logger.info(log_msg)
+    # 2. Si es una ruta ruidosa y fue rápida, a DEBUG (oculto)
+    elif any(noisy in path for noisy in noisy_paths) and duration < 0.5:
+        logger.debug(log_msg)
+    # 3. Si es una búsqueda de torznab muy rápida (caché), a DEBUG (oculto)
+    elif "/torznab" in path and duration < 0.1:
+        logger.debug(log_msg)
+    # 4. Todo lo demás (descargas, borrados, búsquedas reales) a INFO
+    else:
+        logger.info(log_msg)
+    
     return response
 
 @app.on_event("startup")
 def startup_event():
-    logger.info(f"--- Iniciando Test de Conectividad ---")
-    logger.info(f"Objetivo: {AIRDCPP_URL}")
-    headers = get_auth_headers()
+    logger.info("--- Test de Conectividad AirDC++ ---")
     try:
-        logger.info("> Enviando petición GET a /api/v1/hubs...")
-        r = requests.get(f"{AIRDCPP_URL}/api/v1/hubs", headers=headers, timeout=2)
-        logger.info(f"> Respuesta recibida: {r.status_code}")
+        r = requests.get(f"{AIRDCPP_URL}/api/v1/hubs", headers=get_auth_headers(), timeout=5)
         if r.status_code == 200:
             logger.info("Conexión con AirDC++ establecida correctamente.")
         else:
-            logger.warning(f"AirDC++ respondió con status {r.status_code}. Revisa credenciales.")
+            logger.warning(f"AirDC++ respondió con status {r.status_code}")
     except Exception as e:
-        logger.error(f"No se pudo contactar con AirDC++. Detalles: {e}")
-    logger.info("--- Test de Conectividad Finalizado ---")
+        logger.error(f"Fallo de conexión: {e}")
 
-# Incluir routers
 app.include_router(general.router)
 app.include_router(torznab.router)
 app.include_router(qbittorrent.router)

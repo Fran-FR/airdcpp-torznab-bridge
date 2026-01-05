@@ -85,6 +85,11 @@ def db_get_bundle(bundle_id):
         row = conn.execute("SELECT tth, category FROM bundles WHERE bundle_id = ?", (bundle_id,)).fetchone()
         return dict(row) if row else None
 
+def db_get_bundle_ids_by_tth(tth):
+    with db_cursor() as conn:
+        rows = conn.execute("SELECT bundle_id FROM bundles WHERE tth = ?", (tth,)).fetchall()
+        return [r["bundle_id"] for r in rows]
+
 def db_save_bundle(bundle_id, tth, category):
     with db_cursor(commit=True) as conn:
         conn.execute("INSERT OR REPLACE INTO bundles (bundle_id, tth, category) VALUES (?, ?, ?)", (bundle_id, tth, category))

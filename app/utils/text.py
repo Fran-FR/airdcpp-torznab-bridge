@@ -27,9 +27,9 @@ def clean_search_pattern(text):
     # 4. Quitar tags comunes de release
     text = re.sub(r'\b(NF|WEB-DL|HMAX|DSNP|AMZN|AVC|DD\+|Atmos|HDO|1080p|720p|x264|x265|HEVC|Dual|PACK)\b', '', text, flags=re.IGNORECASE)
     
-    # 5. Quedarse con las primeras 4 palabras (título base)
+    # 5. Quedarse con las primeras 7 palabras (título base)
     words = text.split()
-    clean = " ".join(words[:4]).strip()
+    clean = " ".join(words[:7]).strip()
     
     # Si la limpieza ha borrado TODO, devolvemos las primeras palabras del original
     if not clean and words:

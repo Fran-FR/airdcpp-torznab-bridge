@@ -6,12 +6,15 @@ from app.config import HASH_FILE
 from app.core.logging import get_logger
 from app.services.database import (
     init_db, db_get_hex, db_save_hex, db_get_tth_by_hex,
-    db_save_bundle, db_get_bundle, 
+    db_save_bundle, db_get_bundle, db_get_bundle_ids_by_tth,
     db_save_finished, db_get_finished, db_get_all_finished, db_delete_finished,
     db_count_hashes
 )
 
 logger = get_logger("app.persistence")
+
+# Caché de memoria para evitar miles de consultas a SQLite
+_HASH_MEM_CACHE = {}
 
 # --- INTERFAZ PÚBLICA (COMPATIBILIDAD) ---
 # Estas variables ya no se usan directamente para almacenamiento, 
@@ -94,14 +97,20 @@ def save_hashes():
 def get_hex_hash(tth):
     if not tth: return ""
     
-    # 1. Buscar en BD
+    # 1. Buscar en caché de memoria (Super rápido)
+    if tth in _HASH_MEM_CACHE:
+        return _HASH_MEM_CACHE[tth]
+    
+    # 2. Buscar en BD
     hex_val = db_get_hex(tth)
     if hex_val:
+        _HASH_MEM_CACHE[tth] = hex_val
         return hex_val
     
-    # 2. Generar nuevo
+    # 3. Generar nuevo
     new_hex = hashlib.sha1(tth.encode()).hexdigest()
     db_save_hex(tth, new_hex)
+    _HASH_MEM_CACHE[tth] = new_hex
     return new_hex
 
 # --- ACCESORES PARA REEMPLAZAR EL USO DE DICT GLOBAL ---
@@ -194,3 +203,6 @@ def load_hashes():
         migrate_json_to_sqlite(HASH_FILE)
     
     reload_cache_from_db()
+
+# Inicialización automática al importar el módulo
+load_hashes()
