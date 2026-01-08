@@ -3,7 +3,7 @@ import re
 import time
 import requests
 from concurrent.futures import ThreadPoolExecutor
-from app.config import AIRDCPP_URL, AIRDCPP_USER, AIRDCPP_PASS, KNOWN_CATEGORIES
+from app.config import AIRDCPP_URL, AIRDCPP_USER, AIRDCPP_PASS, KNOWN_CATEGORIES, CATEGORY_PROFILES
 from app.utils.text import normalize_text, clean_search_pattern
 from app.services.persistence import BUNDLE_MAP_ID_TO_TTH, BUNDLE_MAP_ID_TO_CAT, save_hashes
 from app.core.locks import GLOBAL_SEARCH_LOCK
@@ -19,8 +19,15 @@ def get_auth_headers():
         return {"Authorization": f"Basic {encoded_auth}"}
     return {}
 
-def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
+def search_airdcpp(query_or_list, is_season_search=False, season_num=None, cat_profile="video"):
     headers = get_auth_headers()
+    
+    # Obtener configuración del perfil
+    profile_cfg = CATEGORY_PROFILES.get(cat_profile, CATEGORY_PROFILES["generic"])
+    allowed_extensions = profile_cfg["extensions"]
+    min_size = profile_cfg["min_size_season"] if is_season_search else profile_cfg["min_size"]
+    
+    logger.info(f"Buscando con perfil '{cat_profile}' (Extensiones: {allowed_extensions or 'todas'}, MinSize: {min_size/1024/1024:.2f}MB)")
     
     # Preparamos el regex para filtrar por temporada si es necesario
     season_regex = None
@@ -94,8 +101,7 @@ def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
             
             requests.delete(f"{AIRDCPP_URL}/api/v1/search/{instance_id}", headers=headers, timeout=5)
             
-            video_extensions = ('.mkv', '.avi', '.mp4', '.m4v', '.mov', '.wmv', '.mpg', '.mpeg')
-            min_size = 100 * 1024 * 1024 if is_season_search else 50 * 1024 * 1024
+            # Filtros dinámicos por perfil
             has_ep_pattern = re.search(r'[Ss]\d{2}[Ee]\d{2}', q_attempt)
             
             for r in raw_results:
@@ -151,7 +157,7 @@ def search_airdcpp(query_or_list, is_season_search=False, season_num=None):
                         else:
                             display_name = f"{final_queries[0]} {display_season_tag}"
                 else:
-                    if not name_lower.endswith(video_extensions): continue
+                    if allowed_extensions and not name_lower.endswith(allowed_extensions): continue
                     display_name = name_raw
                 
                 if size_bytes < min_size: continue
