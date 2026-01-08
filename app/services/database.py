@@ -29,6 +29,16 @@ def db_cursor(commit=False):
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    
+    if os.path.exists(DB_PATH):
+        try:
+            sizeKB = os.path.getsize(DB_PATH) / 1024
+            logger.info(f"Archivo de base de datos detectado en {DB_PATH}: {sizeKB:.2f} KB")
+        except Exception as e:
+            logger.warning(f"No se pudo determinar el tamaño de la DB: {e}")
+    else:
+        logger.warning(f"No se detectó base de datos previa en {DB_PATH}. Se creará una nueva.")
+
     logger.info(f"Probando acceso a base de datos en: {os.path.abspath(DB_PATH)}")
     
     try:

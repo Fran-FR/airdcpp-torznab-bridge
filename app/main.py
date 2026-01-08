@@ -1,14 +1,15 @@
+from app.core.logging import setup_logging, get_logger
+
+# Inicializar logging lo antes posible
+setup_logging()
+logger = get_logger("app.main")
+
 from fastapi import FastAPI, Request
 import time
 import requests
 from app.routers import general, torznab, qbittorrent
 from app.services.airdcpp import AIRDCPP_URL, get_auth_headers
 from app.services.persistence import load_hashes
-from app.core.logging import setup_logging, get_logger
-
-# Inicializar logging
-setup_logging()
-logger = get_logger("app.main")
 
 app = FastAPI(title="AirDC++ Torznab/qBit Bridge")
 
