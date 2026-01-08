@@ -17,7 +17,18 @@ Este proyecto actúa como un puente (bridge) entre **AirDC++** y las aplicacione
 La forma más sencilla de ejecutar el bridge es mediante **Docker Compose**.
 
 ### 1. Preparar la Configuración
-- Crea un archivo `.env` basado en el `.env.example`.
+Crea un archivo llamado `.env` en la misma carpeta que el `docker-compose.yml` con el siguiente contenido:
+
+```env
+# URL de la API de AirDC++ (usar host.docker.internal para acceder al host desde el contenedor)
+AIRDCPP_URL=http://host.docker.internal:5600
+AIRDCPP_USER=tu_usuario
+AIRDCPP_PASS=tu_password
+
+# Opcional pero recomendado para resolución de nombres en español
+TMDB_API_KEY=tu_api_key_aqui
+```
+
 - **Importante**: Añade tu `TMDB_API_KEY` para que el bridge pueda encontrar los nombres de las películas en español.
 
 ### 2. Archivo `docker-compose.yml`
