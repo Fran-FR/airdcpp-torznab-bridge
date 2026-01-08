@@ -8,4 +8,5 @@ TMDB_API_KEY = os.getenv("TMDB_API_KEY", "")
 
 # Constantes
 KNOWN_CATEGORIES = ["airdcpp", "radarr", "sonarr"]
-HASH_FILE = "/app/data/bridge_hashes.json"
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+HASH_FILE = os.path.join(DATA_DIR, "bridge_hashes.json")
