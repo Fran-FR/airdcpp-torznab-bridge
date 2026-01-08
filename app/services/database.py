@@ -5,7 +5,9 @@ from contextlib import contextmanager
 from app.core.logging import get_logger
 
 logger = get_logger("app.database")
-DB_PATH = "/app/data/bridge.db"
+# Ruta configurable vía entorno, por defecto la usada en el contenedor
+DATA_DIR = os.getenv("DATA_DIR", "/app/data")
+DB_PATH = os.path.join(DATA_DIR, "bridge.db")
 
 def get_db_connection():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -27,6 +29,17 @@ def db_cursor(commit=False):
 
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+    
+    if os.path.exists(DB_PATH):
+        try:
+            sizeKB = os.path.getsize(DB_PATH) / 1024
+            logger.info(f"Archivo de base de datos detectado en {DB_PATH}: {sizeKB:.2f} KB")
+        except Exception as e:
+            logger.warning(f"No se pudo determinar el tamaño de la DB: {e}")
+    else:
+        logger.warning(f"No se detectó base de datos previa en {DB_PATH}. Se creará una nueva.")
+
+    logger.info(f"Probando acceso a base de datos en: {os.path.abspath(DB_PATH)}")
     
     try:
         with db_cursor(commit=True) as conn:

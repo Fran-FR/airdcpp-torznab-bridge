@@ -14,14 +14,62 @@ Este proyecto actúa como un puente (bridge) entre **AirDC++** y las aplicacione
 
 ## 🛠️ Instalación y Uso
 
-1. **Requisitos**: Tener Docker y Docker Compose instalados.
-2. **Configuración**:
-   - Crea un archivo `.env` basado en el `.env.example`.
-   - **Importante**: Añade tu `TMDB_API_KEY` para la resolución de nombres en español.
-3. **Levantar el servicio**:
-   ```bash
-   docker compose up -d --build
-   ```
+La forma más sencilla de ejecutar el bridge es mediante **Docker Compose**.
+
+### 1. Preparar la Configuración
+Crea un archivo llamado `.env` en la misma carpeta que el `docker-compose.yml` con el siguiente contenido:
+
+```env
+# URL de la API de AirDC++ (usar host.docker.internal para acceder al host desde el contenedor)
+AIRDCPP_URL=http://host.docker.internal:5600
+AIRDCPP_USER=tu_usuario
+AIRDCPP_PASS=tu_password
+
+# Opcional pero recomendado para resolución de nombres en español
+TMDB_API_KEY=tu_api_key_aqui
+```
+
+- **Importante**: Añade tu `TMDB_API_KEY` para que el bridge pueda encontrar los nombres de las películas en español.
+
+### 2. Archivo `docker-compose.yml`
+Crea un archivo llamado `docker-compose.yml` (o `compose.yaml`) con el siguiente contenido:
+
+```yaml
+version: '3.8'
+
+services:
+  airdcpp-bridge:
+    # OPCIÓN A: Versión Estable (Recomendada)
+    image: ghcr.io/antaneyes/airdcpp-torznab-bridge:latest
+    
+    # OPCIÓN B: Versión de Desarrollo (Novedades)
+    # image: ghcr.io/antaneyes/airdcpp-torznab-bridge:dev
+
+    # OPCIÓN C: Desarrollo Local (Construir desde el código)
+    # build: . 
+    
+    container_name: airdcpp-bridge
+    ports:
+      - 8000:8000
+    environment:
+      - AIRDCPP_URL=${AIRDCPP_URL}
+      - AIRDCPP_USER=${AIRDCPP_USER}
+      - AIRDCPP_PASS=${AIRDCPP_PASS}
+      - TMDB_API_KEY=${TMDB_API_KEY}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+    restart: always
+```
+
+### 3. Levantar el servicio
+```bash
+docker compose up -d
+```
+
+> [!TIP]
+> Si quieres probar las últimas funciones antes de que salgan a la versión principal, cambia la etiqueta de la imagen de `:latest` a `:dev` y ejecuta `docker compose pull && docker compose up -d`.
 
 ## ⚙️ Configuración en Radarr/Sonarr
 

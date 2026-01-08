@@ -3,6 +3,7 @@ from fastapi import APIRouter, Request, Response, Query
 from typing import Optional
 from app.services.metadata import resolve_titles_by_id, resolve_titles_by_name
 from app.services.airdcpp import search_airdcpp
+from app.config import CAT_TO_PROFILE
 from app.core.locks import GLOBAL_SEARCH_LOCK
 from app.utils.xml import format_torznab_results, get_caps_xml, get_test_xml
 from app.core.logging import get_logger
@@ -98,7 +99,14 @@ def torznab_api(
             if cached_xml:
                 return Response(content=cached_xml, media_type="application/xml")
                 
-            results = search_airdcpp(dedup_queries, is_season_search=is_season_search, season_num=season)
+            # Determinar perfil de filtrado por categoría
+            profile = "video" # Default
+            if cat:
+                main_cat = cat.split(',')[0][0] # Primer dígito de la primera categoría
+                profile = CAT_TO_PROFILE.get(main_cat, "generic")
+                logger.debug(f"Categoría Torznab '{cat}' mapeada al perfil: {profile}")
+
+            results = search_airdcpp(dedup_queries, is_season_search=is_season_search, season_num=season, cat_profile=profile)
             
             # Generar XML y guardar en caché
             host = request.headers.get("host", "localhost:8000")

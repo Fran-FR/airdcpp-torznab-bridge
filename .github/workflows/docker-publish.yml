@@ -2,7 +2,7 @@ name: Docker Build & Publish
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "dev" ]
     paths-ignore:
       - 'README.md'
       - '.gitignore'
@@ -47,7 +47,8 @@ jobs:
             ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
             ${{ secrets.DOCKER_USERNAME }}/airdcpp-torznab-bridge
           tags: |
-            type=raw,value=latest
+            type=ref,event=branch
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/master' }}
             type=sha,format=short
 
       - name: Build and push Docker image
